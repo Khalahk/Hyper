@@ -1,27 +1,22 @@
-name: Hyperliquid Bot (cada 30 min)
+name: Hyperliquid Bot Original (cada 30 min)
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *'          # cada 30 minutos
+  workflow_dispatch:                # permite ejecución manual
 
 concurrency:
-  group: bot-cron
+  group: bot-cron-original
   cancel-in-progress: false
-
-permissions:
-  contents: write
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15             # suficiente para una pasada
 
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -43,51 +38,27 @@ jobs:
         uses: actions/cache@v4
         with:
           path: candles_cache.json
-          key: candles-${{ github.run_id }}
+          key: candles-original-${{ github.run_id }}
           restore-keys: |
-            candles-
+            candles-original-
 
-      - name: Restaurar estado del bot
+      - name: Restaurar position_state.json
         uses: actions/cache@v4
         with:
-          path: bot_state.json
-          key: bot-state-${{ github.run_id }}
+          path: position_state.json
+          key: pos-state-original-${{ github.run_id }}
           restore-keys: |
-            bot-state-
+            pos-state-original-
 
-      - name: Restaurar estadísticas
+      - name: Restaurar bot_light_state.json
         uses: actions/cache@v4
         with:
-          path: stats.json
-          key: stats-${{ github.run_id }}
+          path: bot_light_state.json
+          key: light-state-original-${{ github.run_id }}
           restore-keys: |
-            stats-
+            light-state-original-
 
-      - name: Restaurar órdenes enviadas
-        uses: actions/cache@v4
-        with:
-          path: sent_orders.json
-          key: sent-orders-${{ github.run_id }}
-          restore-keys: |
-            sent-orders-
-
-      - name: Restaurar registro de órdenes
-        uses: actions/cache@v4
-        with:
-          path: orders.csv
-          key: orders-${{ github.run_id }}
-          restore-keys: |
-            orders-
-
-      - name: Restaurar trades
-        uses: actions/cache@v4
-        with:
-          path: trades.csv
-          key: trades-${{ github.run_id }}
-          restore-keys: |
-            trades-
-
-      - name: Ejecutar bot
+      - name: Ejecutar bot (una pasada)
         id: bot
         run: python bot_cron.py
         env:
@@ -95,53 +66,30 @@ jobs:
           HL_WALLET_ADDRESS: ${{ secrets.HL_WALLET_ADDRESS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
 
       - name: Guardar caché de velas
         if: always()
         uses: actions/cache@v4
         with:
           path: candles_cache.json
-          key: candles-${{ github.run_id }}
+          key: candles-original-${{ github.run_id }}
 
-      - name: Guardar estado del bot
+      - name: Guardar position_state.json
         if: always()
         uses: actions/cache@v4
         with:
-          path: bot_state.json
-          key: bot-state-${{ github.run_id }}
+          path: position_state.json
+          key: pos-state-original-${{ github.run_id }}
 
-      - name: Guardar estadísticas
+      - name: Guardar bot_light_state.json
         if: always()
         uses: actions/cache@v4
         with:
-          path: stats.json
-          key: stats-${{ github.run_id }}
-
-      - name: Guardar órdenes enviadas
-        if: always()
-        uses: actions/cache@v4
-        with:
-          path: sent_orders.json
-          key: sent-orders-${{ github.run_id }}
-
-      - name: Guardar registro de órdenes
-        if: always()
-        uses: actions/cache@v4
-        with:
-          path: orders.csv
-          key: orders-${{ github.run_id }}
-
-      - name: Guardar trades
-        if: always()
-        uses: actions/cache@v4
-        with:
-          path: trades.csv
-          key: trades-${{ github.run_id }}
+          path: bot_light_state.json
+          key: light-state-original-${{ github.run_id }}
 
       - name: Notificar error si falló
-        if: steps.bot.outcome == 'failure'
+        if: failure()
         run: |
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
           -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
