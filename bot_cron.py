@@ -1450,67 +1450,69 @@ async def main():
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         logging.warning("Ya hay una instancia corriendo, saliendo.")
+        lock_fd.close()
         return
 
-    rotate_logs()
-    log_filename = os.path.join(LOG_DIR, f"{datetime.now().strftime('%Y-%m-%d')}.log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_filename),
-            logging.StreamHandler()
-        ]
-    )
+    try:
+        rotate_logs()
+        log_filename = os.path.join(LOG_DIR, f"{datetime.now().strftime('%Y-%m-%d')}.log")
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_filename),
+                logging.StreamHandler()
+            ]
+        )
 
-    account = Account.from_key(HL_PRIVATE_KEY)
-    info = Info(constants.TESTNET_API_URL, skip_ws=True)
-    exchange = Exchange(account, constants.TESTNET_API_URL, account_address=HL_WALLET_ADDRESS)
+        account = Account.from_key(HL_PRIVATE_KEY)
+        info = Info(constants.TESTNET_API_URL, skip_ws=True)
+        exchange = Exchange(account, constants.TESTNET_API_URL, account_address=HL_WALLET_ADDRESS)
 
-    store = OHLCVStore.load_cache(CANDLES_CACHE_FILE)
-    if store is None:
-        print("Descargando histórico completo (300 días) en paralelo...")
-        store = OHLCVStore(SYMBOLS)
-        await fetch_all_initial_candles(store)
-        store.save_cache(CANDLES_CACHE_FILE)
-    else:
-        print("Caché de velas cargado. Añadiendo última vela diaria...")
-        for sym in SYMBOLS:
-            c = last_closed_daily_candle(sym)
-            if c and c['t'] > store.last_candle_time.get(sym, 0):
-                store.add_candle(sym, c)
+        store = OHLCVStore.load_cache(CANDLES_CACHE_FILE)
+        if store is None:
+            print("Descargando histórico completo (300 días) en paralelo...")
+            store = OHLCVStore(SYMBOLS)
+            await fetch_all_initial_candles(store)
+            store.save_cache(CANDLES_CACHE_FILE)
+        else:
+            print("Caché de velas cargado. Añadiendo última vela diaria...")
+            for sym in SYMBOLS:
+                c = last_closed_daily_candle(sym)
+                if c and c['t'] > store.last_candle_time.get(sym, 0):
+                    store.add_candle(sym, c)
 
-    stats = StatsTracker()
-    order_tracker = OrderIdTracker()
-    order_logger = OrderLogger()
-    bot = LiveBotCron(account, info, exchange, store, stats, order_tracker, order_logger)
-    bot.set_leverage_if_needed()
-    await bot.full_sync()
+        stats = StatsTracker()
+        order_tracker = OrderIdTracker()
+        order_logger = OrderLogger()
+        bot = LiveBotCron(account, info, exchange, store, stats, order_tracker, order_logger)
+        bot.set_leverage_if_needed()
+        await bot.full_sync()
 
-    # Safe Restart
-    if not bot.first_run:
-        logging.info(f"Safe restart: esperando {SAFE_RESTART_DELAY}s...")
-        await asyncio.sleep(SAFE_RESTART_DELAY)
-        send_telegram("🔄 Safe restart completado, reanudando operaciones.")
+        # Safe Restart
+        if not bot.first_run:
+            logging.info(f"Safe restart: esperando {SAFE_RESTART_DELAY}s...")
+            await asyncio.sleep(SAFE_RESTART_DELAY)
+            send_telegram("🔄 Safe restart completado, reanudando operaciones.")
 
-    if bot.first_run:
-        send_telegram("🤖 Bot institucional completo iniciado por primera vez.")
-    else:
-        send_telegram("🔄 Bot reiniciado, recuperando estado...")
+        if bot.first_run:
+            send_telegram("🤖 Bot institucional completo iniciado por primera vez.")
+        else:
+            send_telegram("🔄 Bot reiniciado, recuperando estado...")
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            await bot.run_once()
-            break
-        except RuntimeError:
-            break
-        except Exception as e:
-            logging.error(f"Intento {attempt+1} fallido: {traceback.format_exc()}")
-            if attempt < max_retries - 1:
-                time.sleep(30)
-            else:
-                send_telegram(f"❌ Fallo tras {max_retries} intentos: {str(e)[:200]}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await bot.run_once()
+                break
+            except RuntimeError:
+                break
+            except Exception as e:
+                logging.error(f"Intento {attempt+1} fallido: {traceback.format_exc()}")
+                if attempt < max_retries - 1:
+                    time.sleep(30)
+                else:
+                    send_telegram(f"❌ Fallo tras {max_retries} intentos: {str(e)[:200]}")
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
