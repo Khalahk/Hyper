@@ -85,7 +85,7 @@ CANDLES_CACHE_FILE = "candles_cache.json"
 TRADES_CSV = "trades.csv"
 ORDERS_CSV = "orders.csv"
 SENT_ORDERS_FILE = "sent_orders.json"
-LOCK_FILE = "/tmp/bot_cron.lock"
+LOCK_FILE = os.path.join("logs", "bot_cron.lock")
 CLIENT_ORDER_PREFIX = "bot_inst_"
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -808,7 +808,6 @@ class LiveBotCron:
                     pos['stop_oid'] = stop_order['oid']
                     old_trigger = float(stop_order['triggerPx'])
                     pos['last_stop_price'] = old_trigger
-                    # Mejora 3: verificar y corregir stop si difiere
                     if abs(old_trigger - pos.get('trail', default_trail)) > atr_now * STOP_UPDATE_THRESHOLD_ATR:
                         logging.info(f"Stop {sym} desactualizado, corrigiendo...")
                         await self.update_stop_order(sym, pos.get('trail', default_trail), force=True)
@@ -829,7 +828,6 @@ class LiveBotCron:
                     pos['cooldown_until_vela'] = saved.get('cooldown_until_vela')
                     pos['last_entry_vela'] = saved.get('last_entry_vela')
                     pos['entry_time'] = datetime.fromisoformat(saved['entry_time']) if saved.get('entry_time') else None
-                    # Mejora 8: reconciliar TP parciales/cambios manuales no registrados
                     if pos['orig_sz'] > 0 and pos['current_sz'] < pos['orig_sz'] * 0.9:
                         if not pos['tp_taken']:
                             pos['tp_taken'] = True
@@ -978,7 +976,6 @@ class LiveBotCron:
                     fill_px = float(order_info.get('limitPx', o['limit_price']))
                     if abs(fill_px / o['limit_price'] - 1) > MAX_SLIPPAGE_ENTRY:
                         logging.warning(f"Entrada {sym} cancelada por slippage excesivo: {fill_px} vs {o['limit_price']}")
-                        # Si ya se ejecutó, cerrar inmediatamente
                         if self.positions[sym]['side'] != 0:
                             await self.close_position(sym, "Slippage excesivo", fill_px)
                         del self.pending_orders[sym]
@@ -1490,7 +1487,7 @@ async def main():
     bot.set_leverage_if_needed()
     await bot.full_sync()
 
-    # Mejora 10: Safe Restart – esperar antes de operar tras un reinicio
+    # Safe Restart
     if not bot.first_run:
         logging.info(f"Safe restart: esperando {SAFE_RESTART_DELAY}s...")
         await asyncio.sleep(SAFE_RESTART_DELAY)
