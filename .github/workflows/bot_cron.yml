@@ -12,7 +12,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15             # suficiente para una pasada
+    timeout-minutes: 15
 
     steps:
       - name: Checkout código
@@ -34,29 +34,24 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
+      # Usamos claves fijas para que los caches se sobrescriban siempre con el estado más reciente
       - name: Restaurar caché de velas
         uses: actions/cache@v4
         with:
           path: candles_cache.json
-          key: candles-original-${{ github.run_id }}
-          restore-keys: |
-            candles-original-
+          key: candles-original
 
       - name: Restaurar position_state.json
         uses: actions/cache@v4
         with:
           path: position_state.json
-          key: pos-state-original-${{ github.run_id }}
-          restore-keys: |
-            pos-state-original-
+          key: pos-state-original
 
       - name: Restaurar bot_light_state.json
         uses: actions/cache@v4
         with:
           path: bot_light_state.json
-          key: light-state-original-${{ github.run_id }}
-          restore-keys: |
-            light-state-original-
+          key: light-state-original
 
       - name: Ejecutar bot (una pasada)
         id: bot
@@ -67,26 +62,27 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
+      # Guardar caches (se sobrescribirán en la siguiente ejecución)
       - name: Guardar caché de velas
         if: always()
         uses: actions/cache@v4
         with:
           path: candles_cache.json
-          key: candles-original-${{ github.run_id }}
+          key: candles-original
 
       - name: Guardar position_state.json
         if: always()
         uses: actions/cache@v4
         with:
           path: position_state.json
-          key: pos-state-original-${{ github.run_id }}
+          key: pos-state-original
 
       - name: Guardar bot_light_state.json
         if: always()
         uses: actions/cache@v4
         with:
           path: bot_light_state.json
-          key: light-state-original-${{ github.run_id }}
+          key: light-state-original
 
       - name: Notificar error si falló
         if: failure()
