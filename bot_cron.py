@@ -5,6 +5,7 @@ Basado fielmente en el código original, con correcciones:
 - Usa vela diaria actual (no cerrada) para señales y órdenes límite.
 - Persistencia de cooldown_until.
 - Cache de velas con clave fija en GitHub Actions.
+- Envía estado por Telegram en cada ejecución.
 """
 
 import asyncio
@@ -57,7 +58,7 @@ BEST_PARAMS = {
 }
 
 BASE_URL = constants.TESTNET_API_URL
-STATUS_UPDATE_INTERVAL = 14400   # 4 horas
+STATUS_UPDATE_INTERVAL = 14400   # 4 horas (ya no se usa, pero se mantiene por si acaso)
 
 POS_STATE_FILE = "position_state.json"
 BOT_LIGHT_STATE = "bot_light_state.json"   # para last_day_checked y last_status_update
@@ -765,7 +766,7 @@ class LiveBotCron:
         with open('trades.log', 'a') as f:
             f.write(f"{datetime.now()}: {msg}\n")
 
-    # ---------- Notificación periódica de estado ----------
+    # ---------- Notificación de estado ----------
     async def send_status_update(self):
         try:
             user = self.info.user_state(self.address)
@@ -878,11 +879,8 @@ class LiveBotCron:
         # Mostrar estado
         await self.print_status()
 
-        # Enviar resumen periódico si toca
-        now = datetime.now(timezone.utc)
-        if (now - self.last_status_update).total_seconds() >= STATUS_UPDATE_INTERVAL:
-            await self.send_status_update()
-            self.last_status_update = now
+        # Enviar resumen periódico siempre
+        await self.send_status_update()
 
         # Guardar estados
         self._save_position_state()
