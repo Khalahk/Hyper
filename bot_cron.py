@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Bot Momentum/ATR para Hyperliquid Testnet – ADAPTACIÓN A GITHUB ACTIONS (cada 30 min).
-Basado fielmente en el código original.
+Basado fielmente en el código original, con correcciones:
+- Usa vela diaria actual (no cerrada) para señales y órdenes límite.
+- Persistencia de cooldown_until.
+- Cache de velas con clave fija en GitHub Actions.
 """
 
 import asyncio
@@ -10,7 +13,7 @@ import os
 import time
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import requests
 from hyperliquid.info import Info
@@ -58,9 +61,10 @@ STATUS_UPDATE_INTERVAL = 14400   # 4 horas
 
 POS_STATE_FILE = "position_state.json"
 BOT_LIGHT_STATE = "bot_light_state.json"   # para last_day_checked y last_status_update
+CANDLES_CACHE = "candles_cache.json"
 
 # -------------------------------------------------------------------
-# FUNCIONES DE TELEGRAM (idénticas)
+# FUNCIONES DE TELEGRAM
 # -------------------------------------------------------------------
 def send_telegram(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -73,9 +77,9 @@ def send_telegram(text: str):
         logging.error(f"Error enviando Telegram: {e}")
 
 # -------------------------------------------------------------------
-# FUNCIONES AUXILIARES DE DATOS (idénticas, pero usando última vela CERRADA)
+# FUNCIONES AUXILIARES DE DATOS
 # -------------------------------------------------------------------
-def fetch_candles(coin: str, start_ms: int, end_ms: int, interval: str = "1d") -> list:
+def fetch_candles(coin: str, start_ms: int, end_ms: int, interval: str = "1d") -> List[Dict]:
     all_candles = []
     cursor = start_ms
     interval_ms = 24 * 60 * 60 * 1000 if interval == "1d" else 60 * 60 * 1000
@@ -106,16 +110,15 @@ def fetch_candles(coin: str, start_ms: int, end_ms: int, interval: str = "1d") -
     unique = {c['t']: c for c in all_candles}
     return sorted(unique.values(), key=lambda x: x['t'])
 
-def historical_candles(coin: str, days: int = 300) -> list:
+def historical_candles(coin: str, days: int = 300) -> List[Dict]:
     end = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     start = end - timedelta(days=days)
     return fetch_candles(coin, int(start.timestamp() * 1000), int(end.timestamp() * 1000))
 
-def last_closed_daily_candle(coin: str) -> Optional[dict]:
-    """Última vela diaria cerrada (día anterior completo)."""
+def last_daily_candle(coin: str) -> Optional[Dict]:
+    """Vela diaria actual (la que se está formando hoy)."""
     now = datetime.now(timezone.utc)
-    today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_ms = int(today_midnight.timestamp() * 1000)  # medianoche de hoy
+    end_ms = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
     start_ms = end_ms - 24 * 60 * 60 * 1000
     candles = fetch_candles(coin, start_ms, end_ms)
     return candles[-1] if candles else None
@@ -130,7 +133,7 @@ class OHLCVStore:
 
     def add_candle(self, symbol: str, candle: dict):
         d = self.data[symbol]
-        # Evitar duplicados por timestamp (mejora simple)
+        # Evitar duplicados por timestamp
         if d['close'] and d['close'][-1] == float(candle['c']):
             return
         d['open'].append(float(candle['o']))
@@ -259,7 +262,7 @@ class LiveBotCron:
         self._load_light_state()
 
     # ------------------------------------------------------------------
-    # Persistencia del tamaño original (evitar repetición de TP al reiniciar)
+    # Persistencia del estado
     # ------------------------------------------------------------------
     def _load_position_state(self) -> dict:
         if os.path.exists(POS_STATE_FILE):
@@ -305,7 +308,7 @@ class LiveBotCron:
             logging.error(f"Error guardando light_state: {e}")
 
     # ------------------------------------------------------------------
-    # Utilidades de tamaño y precio (idénticas)
+    # Utilidades de tamaño y precio
     # ------------------------------------------------------------------
     def round_sz(self, symbol: str, sz: float) -> float:
         decimals = self.sz_decimals.get(symbol, 4)
@@ -333,7 +336,7 @@ class LiveBotCron:
                 logging.error(f"No se pudo fijar leverage para {sym}: {e}")
 
     # ------------------------------------------------------------------
-    # Sincronización inicial con el exchange (idéntica)
+    # Sincronización con el exchange (recupera también cooldown_until)
     # ------------------------------------------------------------------
     def sync_state_from_exchange(self):
         try:
@@ -359,18 +362,26 @@ class LiveBotCron:
                 pos['min_price'] = entry
                 pos['trail'] = entry - side * dist
                 pos['riesgo_inicial'] = dist
+                # Recuperar estado de position_state
                 if sym in self.position_state:
-                    orig_sz = self.position_state[sym].get('orig_sz', 0.0)
+                    ps = self.position_state[sym]
+                    orig_sz = ps.get('orig_sz', 0.0)
                     pos['orig_sz'] = orig_sz
                     if orig_sz > 0 and abs(szi) < orig_sz * 0.75:
                         pos['tp_taken'] = True
                         pos['breakeven_activated'] = True
-                        logging.info(f"{sym}: tp_taken recuperado (tamaño actual {abs(szi):.4f} < 75% orig {orig_sz:.4f})")
                     else:
                         pos['tp_taken'] = False
+                    # Recuperar cooldown
+                    if 'cooldown_until' in ps:
+                        try:
+                            pos['cooldown_until'] = datetime.fromisoformat(ps['cooldown_until'])
+                        except:
+                            pos['cooldown_until'] = datetime.now(timezone.utc)
                 else:
                     pos['orig_sz'] = abs(szi)
                     pos['tp_taken'] = False
+                    # No hay cooldown previo, se establecerá al abrir
                 logging.info(f"Posición sincronizada: {sym} {'LONG' if side == 1 else 'SHORT'} @ {entry}")
         except Exception as e:
             logging.error(f"No se pudieron sincronizar posiciones: {e}")
@@ -461,7 +472,10 @@ class LiveBotCron:
                     pos['tp_taken'] = False
                     pos['orig_sz'] = fill_sz
                     pos['cooldown_until'] = datetime.now(timezone.utc) + timedelta(days=BEST_PARAMS['cooldown_days'])
-                    self.position_state[sym] = {'orig_sz': fill_sz}
+                    self.position_state[sym] = {
+                        'orig_sz': fill_sz,
+                        'cooldown_until': pos['cooldown_until'].isoformat()
+                    }
                     self._save_position_state()
                     msg = f"✅ ENTRADA {sym} {'LONG' if o['side'] == 1 else 'SHORT'} @ {fill_px:.4f} | Sz: {fill_sz:.4f} | Nocional: ${pos['nocional']:,.2f}"
                     logging.info(msg)
@@ -473,7 +487,7 @@ class LiveBotCron:
                 logging.error(f"Error check_pending {sym}: {e}")
 
     # ------------------------------------------------------------------
-    # Señales diarias (idéntica, pero con vela cerrada para evitar repaint)
+    # Señales diarias (usa vela actual)
     # ------------------------------------------------------------------
     async def daily_signals(self):
         today = datetime.now(timezone.utc).date()
@@ -489,7 +503,7 @@ class LiveBotCron:
                 stuck_symbols.add(sym)
 
         for sym in SYMBOLS:
-            c = last_closed_daily_candle(sym)
+            c = last_daily_candle(sym)   # <--- vela actual
             if c:
                 self.store.add_candle(sym, c)
 
@@ -506,6 +520,7 @@ class LiveBotCron:
         print(f"Capital: ${account_val:,.2f} | Margen usado: ${margin_used:,.2f}")
 
         for sym in SYMBOLS:
+            # Verificar cooldown
             if self.positions[sym]['cooldown_until'] > datetime.now(timezone.utc):
                 continue
             if self.positions[sym]['side'] != 0:
@@ -588,7 +603,10 @@ class LiveBotCron:
                                    trail=fill_px - side * dist, riesgo_inicial=dist,
                                    breakeven_activated=False, tp_taken=False, orig_sz=fill_sz,
                                    cooldown_until=datetime.now(timezone.utc) + timedelta(days=BEST_PARAMS['cooldown_days']))
-                        self.position_state[sym] = {'orig_sz': fill_sz}
+                        self.position_state[sym] = {
+                            'orig_sz': fill_sz,
+                            'cooldown_until': pos['cooldown_until'].isoformat()
+                        }
                         self._save_position_state()
                         msg = (f"✅ ENTRADA INMEDIATA {sym} {'LONG' if side == 1 else 'SHORT'} @ {fill_px:.4f} | "
                                f"Sz: {fill_sz:.4f} | Nocional: ${fill_nocional:,.2f} | Apalancamiento: {LEVERAGE}x")
@@ -600,7 +618,7 @@ class LiveBotCron:
                 logging.error(f"Excepción {sym}: {e}")
 
     # ------------------------------------------------------------------
-    # Monitor de salidas (idéntico, con verificación post‑orden)
+    # Monitor de salidas (con verificación post‑orden)
     # ------------------------------------------------------------------
     async def _refresh_position_from_exchange(self, sym: str):
         try:
@@ -879,27 +897,26 @@ async def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler()]  # Solo consola, GitHub Actions guarda el log
+        handlers=[logging.StreamHandler()]
     )
 
     account = Account.from_key(HL_PRIVATE_KEY)
     info = Info(constants.TESTNET_API_URL, skip_ws=True)
     exchange = Exchange(account, constants.TESTNET_API_URL, account_address=HL_WALLET_ADDRESS)
 
-    # Cargar velas (primera vez descarga 300 días, luego solo añade la vela cerrada de ayer)
+    # Cargar velas desde caché o descargar histórico
     store = OHLCVStore(SYMBOLS)
-    if os.path.exists("candles_cache.json"):
-        # Cargar desde caché
-        with open("candles_cache.json", 'r') as f:
+    if os.path.exists(CANDLES_CACHE):
+        with open(CANDLES_CACHE, 'r') as f:
             raw = json.load(f)
         store.data = raw
         # Reconstruir indicadores
         for sym in SYMBOLS:
             if raw[sym]['close']:
                 store._update_indicators(sym)
-        print("Caché de velas cargado. Añadiendo última vela cerrada...")
+        print("Caché de velas cargado. Añadiendo vela de hoy...")
         for sym in SYMBOLS:
-            c = last_closed_daily_candle(sym)
+            c = last_daily_candle(sym)   # vela actual
             if c:
                 store.add_candle(sym, c)
     else:
@@ -910,7 +927,7 @@ async def main():
                 store.add_candle(sym, c)
             print(f"  {sym}: {len(candles)} velas")
         # Guardar caché
-        with open("candles_cache.json", 'w') as f:
+        with open(CANDLES_CACHE, 'w') as f:
             json.dump(store.data, f)
 
     bot = LiveBotCron(account, info, exchange, store)
@@ -918,7 +935,7 @@ async def main():
     await bot.run_once()
 
     # Guardar caché de velas al final
-    with open("candles_cache.json", 'w') as f:
+    with open(CANDLES_CACHE, 'w') as f:
         json.dump(store.data, f)
 
 if __name__ == "__main__":
